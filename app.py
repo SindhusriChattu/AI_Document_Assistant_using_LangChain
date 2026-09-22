@@ -1,10 +1,15 @@
 import streamlit as st
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_core.prompts import ChatPromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from collections import Counter
+import re
 import tempfile
 import os
 
+
+# -----------------------------
+# Page Configuration
+# -----------------------------
 
 st.set_page_config(
     page_title="AI Document Assistant",
@@ -14,36 +19,24 @@ st.set_page_config(
 
 st.title("📄 AI Document Assistant")
 st.write(
-    "Upload a PDF and use AI to summarize the document "
-    "or ask questions about its content."
+    "Upload a PDF to extract, summarize, and explore "
+    "important information from the document."
 )
 
 
-# API Key
-api_key = st.secrets.get("GOOGLE_API_KEY")
+# -----------------------------
+# PDF Upload
+# -----------------------------
 
-if not api_key:
-    st.error("Google API key is not configured.")
-    st.stop()
-
-
-# Initialize LLM
-llm = ChatGoogleGenerativeAI(
-    model="gemini-3.8-flash",
-    google_api_key=api_key
-)
-
-
-# File upload
 uploaded_file = st.file_uploader(
-    "Upload a PDF document",
+    "Upload your PDF document",
     type=["pdf"]
 )
 
 
 if uploaded_file:
 
-    # Save uploaded file temporarily
+    # Save uploaded PDF temporarily
     with tempfile.NamedTemporaryFile(
         delete=False,
         suffix=".pdf"
@@ -53,13 +46,19 @@ if uploaded_file:
         temp_path = temp_file.name
 
 
-    # Load PDF
     try:
+
+        # -----------------------------
+        # Load PDF using LangChain
+        # -----------------------------
+
         loader = PyPDFLoader(temp_path)
         documents = loader.load()
 
+        # Combine pages
         full_text = "\n\n".join(
-            doc.page_content for doc in documents
+            document.page_content
+            for document in documents
         )
 
         st.success(
@@ -67,106 +66,226 @@ if uploaded_file:
             f"Pages: {len(documents)}"
         )
 
-    except Exception as e:
-        st.error(f"Error loading document: {e}")
-        st.stop()
 
+        # -----------------------------
+        # LangChain Text Splitting
+        # -----------------------------
 
-    # Sidebar
-    st.sidebar.header("Document Actions")
-
-    action = st.sidebar.radio(
-        "Choose an action:",
-        [
-            "Summarize Document",
-            "Ask a Question"
-        ]
-    )
-
-
-    # -------------------------
-    # SUMMARY
-    # -------------------------
-
-    if action == "Summarize Document":
-
-        if st.button("Generate Summary"):
-
-            with st.spinner("Generating summary..."):
-
-                prompt = ChatPromptTemplate.from_template(
-                    """
-                    You are an AI document assistant.
-
-                    Summarize the following document clearly.
-
-                    Provide:
-                    1. Short overview
-                    2. Important points
-                    3. Key findings
-                    4. Important dates or information
-                    5. Conclusion
-
-                    Document:
-                    {document}
-                    """
-                )
-
-                chain = prompt | llm
-
-                response = chain.invoke({
-                    "document": full_text
-                })
-
-                st.subheader("📋 Document Summary")
-                st.write(response.content)
-
-
-    # -------------------------
-    # QUESTION ANSWERING
-    # -------------------------
-
-    else:
-
-        question = st.text_input(
-            "Ask a question about the document:"
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=100
         )
 
-        if st.button("Get Answer") and question:
+        chunks = text_splitter.split_text(full_text)
 
-            with st.spinner("Finding the answer..."):
 
-                prompt = ChatPromptTemplate.from_template(
-                    """
-                    You are an AI document assistant.
+        st.info(
+            f"Document contains approximately "
+            f"{len(chunks)} text chunks."
+        )
 
-                    Answer the user's question using only
-                    the information available in the document.
 
-                    If the answer is not available in the
-                    document, say:
-                    "The information is not available
-                    in the uploaded document."
+        # -----------------------------
+        # Sidebar
+        # -----------------------------
 
-                    Document:
-                    {document}
+        st.sidebar.header("Document Assistant")
 
-                    User Question:
-                    {question}
-                    """
+        option = st.sidebar.radio(
+            "Choose an option",
+            [
+                "Document Summary",
+                "Ask a Question",
+                "Key Information",
+                "View Extracted Text"
+            ]
+        )
+
+
+        # ==================================================
+        # DOCUMENT SUMMARY
+        # ==================================================
+
+        if option == "Document Summary":
+
+            st.subheader("📋 Document Summary")
+
+            # Split into paragraphs
+            paragraphs = [
+                p.strip()
+                for p in re.split(r"\n\s*\n", full_text)
+                if len(p.strip()) > 80
+            ]
+
+            # Select important paragraphs
+            summary_paragraphs = paragraphs[:8]
+
+            if summary_paragraphs:
+
+                for paragraph in summary_paragraphs:
+                    st.write("•", paragraph)
+
+            else:
+
+                st.warning(
+                    "Not enough text was found to create a summary."
                 )
 
-                chain = prompt | llm
 
-                response = chain.invoke({
-                    "document": full_text,
-                    "question": question
-                })
+        # ==================================================
+        # QUESTION ANSWERING
+        # ==================================================
 
-                st.subheader("💡 Answer")
-                st.write(response.content)
+        elif option == "Ask a Question":
+
+            st.subheader("❓ Ask About the Document")
+
+            question = st.text_input(
+                "Enter your question:"
+            )
+
+            if st.button("Search Document") and question:
+
+                # Convert question into keywords
+                question_words = set(
+                    re.findall(
+                        r"\b[a-zA-Z]{3,}\b",
+                        question.lower()
+                    )
+                )
+
+                # Score chunks according to keyword matches
+                scored_chunks = []
+
+                for chunk in chunks:
+
+                    chunk_words = set(
+                        re.findall(
+                            r"\b[a-zA-Z]{3,}\b",
+                            chunk.lower()
+                        )
+                    )
+
+                    score = len(
+                        question_words.intersection(
+                            chunk_words
+                        )
+                    )
+
+                    if score > 0:
+                        scored_chunks.append(
+                            (score, chunk)
+                        )
+
+                # Sort by relevance
+                scored_chunks.sort(
+                    key=lambda x: x[0],
+                    reverse=True
+                )
+
+                if scored_chunks:
+
+                    st.success("Relevant information found:")
+
+                    for score, chunk in scored_chunks[:3]:
+
+                        st.write(chunk)
+                        st.divider()
+
+                else:
+
+                    st.warning(
+                        "No relevant information was found "
+                        "in the document."
+                    )
 
 
-    # Remove temporary file
-    if os.path.exists(temp_path):
-        os.remove(temp_path)
+        # ==================================================
+        # KEY INFORMATION
+        # ==================================================
+
+        elif option == "Key Information":
+
+            st.subheader("🔍 Key Information")
+
+            # Extract email
+            emails = re.findall(
+                r'[\w\.-]+@[\w\.-]+\.\w+',
+                full_text
+            )
+
+            # Extract phone numbers
+            phone_numbers = re.findall(
+                r'\b\d{10}\b',
+                full_text
+            )
+
+            # Extract years
+            years = re.findall(
+                r'\b(?:19|20)\d{2}\b',
+                full_text
+            )
+
+            if emails:
+
+                st.write("### 📧 Email")
+                for email in set(emails):
+                    st.write(email)
+
+            if phone_numbers:
+
+                st.write("### 📱 Phone")
+                for phone in set(phone_numbers):
+                    st.write(phone)
+
+            if years:
+
+                st.write("### 📅 Years")
+                st.write(
+                    ", ".join(sorted(set(years)))
+                )
+
+            # Word frequency
+            words = re.findall(
+                r'\b[a-zA-Z]{4,}\b',
+                full_text.lower()
+            )
+
+            common_words = Counter(words).most_common(15)
+
+            st.write("### 🔑 Frequently Used Words")
+
+            for word, count in common_words:
+
+                st.write(
+                    f"**{word}** — {count} occurrences"
+                )
+
+
+        # ==================================================
+        # VIEW TEXT
+        # ==================================================
+
+        elif option == "View Extracted Text":
+
+            st.subheader("📄 Extracted Document Text")
+
+            st.text_area(
+                "Document Content",
+                full_text,
+                height=500
+            )
+
+
+    except Exception as e:
+
+        st.error(
+            f"Unable to process the document: {e}"
+        )
+
+
+    finally:
+
+        # Remove temporary PDF
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
